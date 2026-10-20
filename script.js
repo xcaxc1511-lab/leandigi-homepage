@@ -1,9 +1,128 @@
+// Homepage CMS: content saved in the admin ("Sửa Trang Chủ") is served by GET /api/site?page=home.
+// It is applied before initMainPage() so the typed words, logo marquees and case slider start
+// from the edited content. The HTML stays the default/fallback if the API is slow or unavailable.
+const CMS_API_ORIGIN = 'https://leandigi.pages.dev';
+const CMS_TIMEOUT_MS = 1500;
+const cmsOnSiteOrigin = () => /(^|\.)leandigi\.pages\.dev$/.test(location.hostname) || ['localhost', '127.0.0.1'].includes(location.hostname);
+
+// Relative paths (assets/…, contact.html) only exist on the main site; elsewhere (GitHub Pages,
+// GHL embeds) point them at leandigi.pages.dev.
+const cmsResolve = (value) => {
+  if (cmsOnSiteOrigin() || /^(https?:|mailto:|tel:|#|\/\/)/i.test(value)) return value;
+  return `${CMS_API_ORIGIN}/${value.replace(/^\/+/, '')}`;
+};
+
+// Replace the first non-empty text node, keeping child elements such as the button arrow.
+const cmsSetText = (element, value) => {
+  const textNode = [...element.childNodes].find((node) => node.nodeType === 3 && node.nodeValue.trim());
+  if (!textNode) { element.textContent = value; return; }
+  const [, lead, trail] = textNode.nodeValue.match(/^(\s*)[\s\S]*?(\s*)$/);
+  textNode.nodeValue = `${lead}${value}${trail}`;
+};
+
+const cmsImage = (src, alt, extra = {}) => {
+  const image = document.createElement('img');
+  image.src = cmsResolve(src);
+  image.alt = alt;
+  Object.entries(extra).forEach(([name, value]) => image.setAttribute(name, value));
+  return image;
+};
+
+const cmsRenderers = {
+  'hero-marquee': (track, logos) => {
+    track.querySelectorAll('.hero-marquee-group').forEach((group, groupIndex) => {
+      group.replaceChildren(...logos.map((logo) => cmsImage(logo.image, groupIndex ? '' : logo.name, { loading: 'lazy' })));
+    });
+  },
+  'customer-rows': (section, logos) => {
+    const half = Math.ceil(logos.length / 2);
+    section.querySelectorAll('.customer-set').forEach((set, rowIndex) => {
+      const row = rowIndex === 0 ? logos.slice(0, half) : logos.slice(half);
+      set.replaceChildren(...row.map((logo) => cmsImage(logo.image, logo.name)));
+    });
+  },
+  'case-slides': (track, slides) => {
+    track.replaceChildren(...slides.map((slide) => {
+      const figure = document.createElement('figure');
+      figure.className = 'case-slide';
+      figure.setAttribute('data-case-slide', '');
+      figure.appendChild(cmsImage(slide.image, slide.alt, { loading: 'lazy' }));
+      return figure;
+    }));
+  }
+};
+
+const applyHomeContent = (content) => {
+  const has = (key) => Object.prototype.hasOwnProperty.call(content, key);
+  document.querySelectorAll('[data-cms]').forEach((element) => {
+    if (has(element.dataset.cms)) cmsSetText(element, content[element.dataset.cms]);
+  });
+  document.querySelectorAll('[data-cms-href]').forEach((element) => {
+    if (has(element.dataset.cmsHref)) element.setAttribute('href', cmsResolve(content[element.dataset.cmsHref]));
+  });
+  document.querySelectorAll('[data-cms-src]').forEach((element) => {
+    if (has(element.dataset.cmsSrc)) element.setAttribute('src', cmsResolve(content[element.dataset.cmsSrc]));
+  });
+  document.querySelectorAll('[data-cms-alt]').forEach((element) => {
+    if (has(element.dataset.cmsAlt)) element.setAttribute('alt', content[element.dataset.cmsAlt]);
+  });
+  document.querySelectorAll('[data-cms-lines]').forEach((element) => {
+    const lines = content[element.dataset.cmsLines];
+    if (!Array.isArray(lines) || !lines.length) return;
+    const lineClass = element.firstElementChild?.className || 'mobile-semantic-line';
+    const nodes = [];
+    lines.forEach((line, index) => {
+      if (index) nodes.push(document.createTextNode(' '));
+      const span = document.createElement('span');
+      span.className = lineClass;
+      span.textContent = line;
+      nodes.push(span);
+    });
+    element.replaceChildren(...nodes);
+  });
+  document.querySelectorAll('[data-cms-words]').forEach((element) => {
+    const words = content[element.dataset.cmsWords];
+    if (!Array.isArray(words) || !words.length) return;
+    element.dataset.words = JSON.stringify(words);
+    element.textContent = words[0];
+  });
+  document.querySelectorAll('[data-cms-list]').forEach((element) => {
+    const items = content[element.dataset.cmsList];
+    const render = cmsRenderers[element.dataset.cmsRender];
+    if (Array.isArray(items) && items.length && render) render(element, items);
+  });
+};
+
+const loadHomeContent = async () => {
+  if (!document.querySelector('[data-cms], [data-cms-list]')) return;
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller && window.setTimeout(() => controller.abort(), CMS_TIMEOUT_MS);
+  try {
+    const base = cmsOnSiteOrigin() ? '' : CMS_API_ORIGIN;
+    const response = await fetch(`${base}/api/site?page=home`, controller ? { signal: controller.signal } : {});
+    if (!response.ok) return;
+    const data = await response.json();
+    if (data && data.content && typeof data.content === 'object') applyHomeContent(data.content);
+  } catch (error) {
+    // Keep the built-in HTML content
+  } finally {
+    if (timer) window.clearTimeout(timer);
+  }
+};
+
 const initMainPage = () => {
 document.body.classList.add('js');
 
 const typedText = document.querySelector('[data-typed]');
 if (typedText) {
-  const words = ['Tinh Gọn', 'Nhân Bản', 'Bền Vững'];
+  const defaultWords = ['Tinh Gọn', 'Nhân Bản', 'Bền Vững'];
+  let words = defaultWords;
+  try {
+    const saved = JSON.parse(typedText.dataset.words || 'null');
+    if (Array.isArray(saved) && saved.length) words = saved;
+  } catch (error) {
+    words = defaultWords;
+  }
   const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
   if (reducedMotion) {
@@ -449,8 +568,12 @@ if (caseSlider) {
 
 };
 
+const startMainPage = () => {
+  loadHomeContent().finally(initMainPage);
+};
+
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initMainPage, { once: true });
+  document.addEventListener('DOMContentLoaded', startMainPage, { once: true });
 } else {
-  initMainPage();
+  startMainPage();
 }
